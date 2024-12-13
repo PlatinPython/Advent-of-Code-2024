@@ -19,18 +19,14 @@ solve [] = []
 solve (x : xs) = (price x :) $ solve xs
 
 price :: Machine -> Maybe Int
-price ((ax, ay), (bx, by), (px, py)) =
-  if (by * px - bx * py) `mod` (ax * by - ay * bx) /= 0
+price ((ax, ay), (bx, by), (px, py)) = do
+  let (a, ar) = (by * px - bx * py) `divMod` (ax * by - ay * bx)
+  let (b, br) = (ay * px - ax * py) `divMod` (ay * bx - ax * by)
+  if ar /= 0 || br /= 0
     then
       Nothing
-    else do
-      let a = (by * px - bx * py) `div` (ax * by - ay * bx)
-      if (ay * px - ax * py) `mod` (ay * bx - ax * by) /= 0
-        then
-          Nothing
-        else do
-          let b = (ay * px - ax * py) `div` (ay * bx - ax * by)
-          Just $ a * 3 + b
+    else
+      Just $ a * 3 + b
 
 parseMachines :: Parser [Machine]
 parseMachines = sepBy1 parseMachine newline

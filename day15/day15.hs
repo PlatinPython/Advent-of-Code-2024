@@ -1,39 +1,41 @@
-import Control.Monad (foldM_, forM_)
-import Data.Array.IO (IOArray, getAssocs, getBounds, newArray, readArray, writeArray)
+{-# LANGUAGE LambdaCase #-}
+
+import Control.Monad (foldM_)
+import Data.Array.IO (IOArray, getAssocs, getBounds, newListArray, readArray, writeArray)
+import Data.Bifunctor (first)
 import Data.Either (fromRight)
 import Data.Functor (($>))
+import Data.List (nub, sortOn, transpose)
+import Data.Maybe (fromMaybe)
 import Text.Parsec (char, many1, newline, sepEndBy1, try, (<|>))
 import Text.Parsec.String (Parser, parseFromFile)
 
-data Tile = Robot | Box | Wall | Empty deriving (Eq)
+data Tile = Robot | Box | Wall | Empty | LeftBox | RightBox deriving (Eq)
 
-instance Show Tile where
-  show :: Tile -> String
-  show Robot = "@"
-  show Box = "O"
-  show Wall = "#"
-  show Empty = "."
-
-data Dir = N | E | S | W deriving (Show, Eq)
+data Dir = N | E | S | W
 
 type Pos = (Int, Int)
 
 type Warehouse = IOArray Pos Tile
 
 part1 :: FilePath -> IO Int
-part1 file = do
-  (tiles, dirs) <- fromRight ([], []) <$> parseFromFile parse file
-  let (sizeX, sizeY) = (length $ head tiles, length tiles)
-  warehouse <- newArray ((0, 0), (sizeX - 1, sizeY - 1)) undefined :: IO Warehouse
-  mapM_ (\pos@(x, y) -> writeArray warehouse pos $ tiles !! y !! x) [(x, y) | x <- [0 .. sizeX - 1], y <- [0 .. sizeY - 1]]
+part1 file = uncurry (solve Box) . fromRight ([], []) =<< parseFromFile parse file
+
+part2 :: FilePath -> IO Int
+part2 file = uncurry (solve LeftBox) . first (map (concatMap (\case Wall -> [Wall, Wall]; Box -> [LeftBox, RightBox]; Empty -> [Empty, Empty]; Robot -> [Robot, Empty]))) . fromRight ([], []) =<< parseFromFile parse file
+
+solve :: Tile -> [[Tile]] -> [Dir] -> IO Int
+solve gpsTile tiles dirs = do
+  let (sizeX, sizeY) = (length (head tiles) - 1, length tiles - 1)
+  warehouse <- newListArray ((0, 0), (sizeX, sizeY)) . concat . transpose $ tiles
   pos <- head . map fst . filter (\(_, tile) -> tile == Robot) <$> getAssocs warehouse
   writeArray warehouse pos Empty
   foldM_ (move warehouse) pos dirs
-  sum . map ((\(x, y) -> 100 * y + x) . fst) . filter (\(_, tile) -> tile == Box) <$> getAssocs warehouse
+  sum . map ((\(x, y) -> 100 * y + x) . fst) . filter (\(_, tile) -> tile == gpsTile) <$> getAssocs warehouse
 
 move :: Warehouse -> Pos -> Dir -> IO Pos
 move warehouse pos@(x, y) N = do
-  let pos' = (x, y - 1)
+  let pos'@(x', y') = (x, y - 1)
   tile <- readArray warehouse pos'
   case tile of
     Empty -> return pos'
@@ -47,8 +49,10 @@ move warehouse pos@(x, y) N = do
           return pos
         else
           return pos'
+    LeftBox -> fromMaybe pos <$> handleWideBox warehouse pos pos' N
+    RightBox -> fromMaybe pos <$> handleWideBox warehouse pos (x' - 1, y') N
 move warehouse pos@(x, y) E = do
-  let pos' = (x + 1, y)
+  let pos'@(x', y') = (x + 1, y)
   tile <- readArray warehouse pos'
   case tile of
     Empty -> return pos'
@@ -62,8 +66,10 @@ move warehouse pos@(x, y) E = do
           return pos
         else
           return pos'
+    LeftBox -> fromMaybe pos <$> handleWideBox warehouse pos pos' E
+    RightBox -> fromMaybe pos <$> handleWideBox warehouse pos (x' - 1, y') E
 move warehouse pos@(x, y) S = do
-  let pos' = (x, y + 1)
+  let pos'@(x', y') = (x, y + 1)
   tile <- readArray warehouse pos'
   case tile of
     Empty -> return pos'
@@ -77,8 +83,10 @@ move warehouse pos@(x, y) S = do
           return pos
         else
           return pos'
+    LeftBox -> fromMaybe pos <$> handleWideBox warehouse pos pos' S
+    RightBox -> fromMaybe pos <$> handleWideBox warehouse pos (x' - 1, y') S
 move warehouse pos@(x, y) W = do
-  let pos' = (x - 1, y)
+  let pos'@(x', y') = (x - 1, y)
   tile <- readArray warehouse pos'
   case tile of
     Empty -> return pos'
@@ -92,13 +100,78 @@ move warehouse pos@(x, y) W = do
           return pos
         else
           return pos'
+    LeftBox -> fromMaybe pos <$> handleWideBox warehouse pos pos' W
+    RightBox -> fromMaybe pos <$> handleWideBox warehouse pos (x' - 1, y') W
 
-printWarehouse :: Warehouse -> IO ()
-printWarehouse warehouse = do
-  (_, (sizeX, sizeY)) <- getBounds warehouse
-  forM_ [0 .. sizeY] $ \y -> do
-    forM_ [0 .. sizeX] $ \x -> putStr . show =<< readArray warehouse (x, y)
-    putStrLn ""
+handleWideBox :: Warehouse -> Pos -> Pos -> Dir -> IO (Maybe Pos)
+handleWideBox warehouse rpos@(rx, ry) pos@(x, y) dir = do
+  changes <- moveWideBox warehouse pos dir
+  case changes of
+    Nothing -> return Nothing
+    Just changes -> do
+      mapM_
+        ( \(from@(fx, fy), to@(tx, ty)) -> do
+            writeArray warehouse from Empty
+            writeArray warehouse (fx + 1, fy) Empty
+            writeArray warehouse to LeftBox
+            writeArray warehouse (tx + 1, ty) RightBox
+        )
+        $ reverse changes
+      return . return $ case dir of
+        N -> (rx, ry - 1)
+        E -> (rx + 1, ry)
+        S -> (rx, ry + 1)
+        W -> (rx - 1, ry)
+
+moveWideBox :: Warehouse -> Pos -> Dir -> IO (Maybe [(Pos, Pos)])
+moveWideBox warehouse pos@(x, y) N = do
+  let lpos@(lx, ly) = (x, y - 1)
+  let rpos@(rx, ry) = (x + 1, y - 1)
+  ltile <- readArray warehouse lpos
+  rtile <- readArray warehouse rpos
+  l <- case ltile of
+    Empty -> return $ Just [(pos, lpos)]
+    Wall -> return Nothing
+    LeftBox -> fmap ((pos, lpos) :) <$> moveWideBox warehouse lpos N
+    RightBox -> fmap ((pos, lpos) :) <$> moveWideBox warehouse (lx - 1, ly) N
+  r <- case rtile of
+    Empty -> return $ Just [(pos, lpos)]
+    Wall -> return Nothing
+    LeftBox -> fmap ((pos, lpos) :) <$> moveWideBox warehouse rpos N
+    RightBox -> fmap ((pos, lpos) :) <$> moveWideBox warehouse (rx - 1, ry) N
+  return . fmap (sortOn (negate . snd . fst) . nub) $ (++) <$> l <*> r
+moveWideBox warehouse pos@(x, y) E = do
+  let pos' = (x + 1, y)
+  let pos'' = (x + 2, y)
+  tile <- readArray warehouse pos''
+  case tile of
+    Empty -> return $ Just [(pos, pos')]
+    Wall -> return Nothing
+    LeftBox -> fmap ((pos, pos') :) <$> moveWideBox warehouse pos'' E
+moveWideBox warehouse pos@(x, y) S = do
+  let lpos@(lx, ly) = (x, y + 1)
+  let rpos@(rx, ry) = (x + 1, y + 1)
+  ltile <- readArray warehouse lpos
+  rtile <- readArray warehouse rpos
+  l <- case ltile of
+    Empty -> return $ Just [(pos, lpos)]
+    Wall -> return Nothing
+    LeftBox -> fmap ((pos, lpos) :) <$> moveWideBox warehouse lpos S
+    RightBox -> fmap ((pos, lpos) :) <$> moveWideBox warehouse (lx - 1, ly) S
+  r <- case rtile of
+    Empty -> return $ Just [(pos, lpos)]
+    Wall -> return Nothing
+    LeftBox -> fmap ((pos, lpos) :) <$> moveWideBox warehouse rpos S
+    RightBox -> fmap ((pos, lpos) :) <$> moveWideBox warehouse (rx - 1, ry) S
+  return . fmap (sortOn (snd . fst) . nub) $ (++) <$> l <*> r
+moveWideBox warehouse pos@(x, y) W = do
+  let pos' = (x - 1, y)
+  let pos'' = (x - 2, y)
+  tile <- readArray warehouse pos'
+  case tile of
+    Empty -> return $ Just [(pos, pos')]
+    Wall -> return Nothing
+    RightBox -> fmap ((pos, pos') :) <$> moveWideBox warehouse pos'' W
 
 parse :: Parser ([[Tile]], [Dir])
 parse = do
